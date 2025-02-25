@@ -7,26 +7,49 @@
 #include "hardware/i2c.h"
 #include "hardware/pwm.h"
 #include "hardware/adc.h"
+#include "hardware/timer.h"
 
 #include "lib/ssd1306.h"
+#include "lib/matriz.h"
+#include "ws2812.pio.h"
 
+// Push-buttons "A" e "B"
 #define GPIO_BOTAO_A    5
 #define GPIO_BOTAO_B    6
+
+// LED RGB
 #define GPIO_LED_R      13
 #define GPIO_LED_G      11
 #define GPIO_LED_B      12
+
+// Joystick (potenciômetro)
 #define GPIO_BTN_JOY    22
 #define GPIO_VRX_JOY    26
 #define GPIO_VRY_JOY    27
 
+// Display OLED
 #define I2C_PORT        i2c1
 #define GPIO_I2C_SDA    14     
 #define GPIO_I2C_SLC    15
 #define ADDRESS         0x3C
 
+// Matriz de LEDs 5x5
+#define GPIO_WS2812     7
+#define NUM_LEDS        25
+
+// Buzzer "A"
+#define GPIO_BUZZER     21
+
+// PWM (Buzzer e LED RGB)
 #define PWM_FREQUENCY   50          // Frequência definida em 50Hz para que o servo motor funcione
 #define CLOCK_BASE      125000000   // 125 MHz
 #define PWM_DIVISER     125.0       // Divisor inteiro de 125.0. Poderia ser de até 
+
+// Constantes para os Tempos (em milissegundos) das luzes do semáforo
+#define LIGHT_G_TIME     8000    // Tempo base para sinal verde
+#define LIGHT_Y_TIME     3000    // Tempo base para sinal amarelo
+#define LIGHT_R_TIME     8000    // Tempo base para sinal vermelho
+#define LIGHT_PEDESTRIAN 10000   // Tempo para fase de pedestre
 
 /*
  * Cria variáveis globais
@@ -34,11 +57,46 @@
  * volatile: a variável pode ser alterada por eventos externos
  */ 
 static volatile uint32_t last_time = 0; // Armazena o tempo do último evento (em microssegundos)
+static volatile PIO pio;
+static volatile uint sm = 0;
+
+// Variável global para flag de pedestre (setada via interrupção)
+static volatile bool bPedestre = false;
+
+// Variável que controla se a próxima a via a ser liberada é a VIA A depois da liberação para pedestres
+static volatile bool bGreenA = false;
+
+// Máquina de estados do semáforo
+typedef enum {
+    STATE_GREEN_A,      // Estado luz VERDE, via A
+    STATE_YELLOW_A,     // Estado luz AMARELA, via A
+    STATE_GREEN_B,      // Estado luz VERDE, via B
+    STATE_YELLOW_B,     // Estado luz VERDE, via B
+    STATE_PEDESTRIAN    // Estado travessia de PEDESTRE
+} state_t;
+
+// Armazena o estado atual (começa em VERDE)
+state_t estadoAtual = STATE_GREEN_A;
+
+// Armazena o tempo de início de um novo estado
+uint32_t tempoInicioEstado = 0;
+
+// Inicializa vetor para apagar todos os leds
+static double desenho_apaga[NUM_LEDS] = {
+    {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00},
+    {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00},
+    {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00},
+    {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00},
+    {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}, {0.00, 0.00, 0.00}
+};
 
 ssd1306_t ssd; // Variável de inicialização do display
 
-static volatile int  adc_valor_x; // Variável para armazenar o valor do eixo X do joystick
-static volatile int  adc_valor_y; // Variável para armazenar o valor do eixo Y do joystick
+// Variável string para linhas do Display (máximo 12 caracteres por linha)
+char linhaTextoDisplay[12];
+
+static volatile int  adc_valor_x, adc_valor_y; // Variável para armazenar o valor do eixo do joystick
+float fluxoViaA, fluxoViaB; // Variável para armazenar o valor do eixo Y do joystick em percentual
 
 // Variável  para calcular o PWM WRAP (número de ciclos do clock do PWM)
 // O PWM WRAP é calculado pela fórmula da FREQUÊNCIA PWM = FREQUÊNCIA DE CLOCK DO RP2040 / (DIVISOR  * WRAP)
@@ -47,14 +105,18 @@ uint16_t wrapValue = CLOCK_BASE / (PWM_FREQUENCY * PWM_DIVISER); // 20.000
 // Prototipação da função de interrupção
 static void gpio_irq_handler(uint gpio, uint32_t events);
 
-// Função para acender o LED por um tempo específico
-void controlaLed(uint gpio, bool operacao) {
-    gpio_put(gpio, operacao); // Liga/Desliga o LED indicado no parâmetro gpio
-}
+// Função que configura PIO da Matriz de LEDs 5x5
+uint pio_config(PIO pio) {
+    bool activateClock;
+    activateClock = set_sys_clock_khz(128000, false);
 
-// Controlar o DISPLAY LCD
-bool bLed_B_R = 0;
-bool bDesenhaQuadro = 1;
+    // Inicializa PIO
+    uint offset = pio_add_program(pio, &ws2812_program);
+    uint sm = pio_claim_unused_sm(pio, true);
+    ws2812_program_init(pio, sm, offset, GPIO_WS2812);
+
+    return sm;
+}
 
 // Callback da interrupção
 void gpio_irq_handler(uint gpio, uint32_t events) {
@@ -67,26 +129,13 @@ void gpio_irq_handler(uint gpio, uint32_t events) {
 
         // Alterna os LEDs RGB entre aceso/apagado
         if (gpio == GPIO_BOTAO_A) {
-            bLed_B_R = !bLed_B_R;
-            controlaLed(GPIO_LED_G, !gpio_get(GPIO_LED_G));
-            pwm_set_gpio_level(GPIO_LED_B, (bLed_B_R) ? 20000 : 0);
-            pwm_set_gpio_level(GPIO_LED_R, (bLed_B_R) ? 20000 : 0);
+            bPedestre = true;
         } 
-        // Alterna o LED VERDE entre aceso/apagado e modifica a borda do display com uma animação
-        else if (gpio == GPIO_BTN_JOY) { 
-            controlaLed(GPIO_LED_G, !gpio_get(GPIO_LED_G));
-            ssd1306_rect(&ssd, 3, 3, 122, 60, true, false); // Desenha um retângulo na TELA LCD
-            ssd1306_rect(&ssd, 5, 5, 118, 55, !bDesenhaQuadro, false); // Desenha um retângulo 
-            ssd1306_rect(&ssd, 7, 7, 114, 52, !bDesenhaQuadro, false); // Desenha um retângulo  
-            ssd1306_send_data(&ssd); 
-            bDesenhaQuadro = !bDesenhaQuadro;
-        }
         // Reseta a placa 
         else if (gpio == GPIO_BOTAO_B) {
             // Reseta a placa e entra em modo BOOTSEL
             reset_usb_boot(0, 0);
         }
-
     }
 }
 
@@ -111,11 +160,6 @@ void init_botoes() {
     gpio_init(GPIO_BOTAO_B);
     gpio_set_dir(GPIO_BOTAO_B, GPIO_IN); // Configura o pino como entrada
     gpio_pull_up(GPIO_BOTAO_B); // Habilita o pull-up interno
-
-    // Inicializa botão do JOYSTICK
-    gpio_init(GPIO_BTN_JOY);
-    gpio_set_dir(GPIO_BTN_JOY, GPIO_IN);
-    gpio_pull_up(GPIO_BTN_JOY); 
 }
 
 // Inicializa Display SSD1306
@@ -156,26 +200,64 @@ void init_adc() {
     adc_gpio_init(GPIO_VRY_JOY);
 }
 
+// Inicializa o PWM para o LED RGB e BUZZER "A"
 void init_pwm() {
-    // Habilita o pino GPIO como PWM (LEDs RGB AZUL e VERMELHO)
-    gpio_set_function(GPIO_LED_B, GPIO_FUNC_PWM);
-    gpio_set_function(GPIO_LED_R, GPIO_FUNC_PWM);
+    pwm_config config = pwm_get_default_config();
+
+    // Habilita o pino GPIO como PWM 
+    gpio_set_function(GPIO_BUZZER, GPIO_FUNC_PWM);
     
     // Captura o canal (slice) PWM 
-    uint16_t slicePWMLedB = pwm_gpio_to_slice_num(GPIO_LED_B);
-    uint16_t slicePWMLedR = pwm_gpio_to_slice_num(GPIO_LED_R);
+    uint16_t sliceBuzzer  = pwm_gpio_to_slice_num(GPIO_BUZZER);
 
-    // Define o dividor de clock do PWM em 2.0
-    pwm_set_clkdiv(slicePWMLedB, PWM_DIVISER);
-    pwm_set_clkdiv(slicePWMLedR, PWM_DIVISER);
+    // Inicializa o canal PWM para o buzzer
+    pwm_init(sliceBuzzer, &config, true);
+}
 
-    // Define o valor WRAP PWM
-    pwm_set_wrap(slicePWMLedB, wrapValue);
-    pwm_set_wrap(slicePWMLedR, wrapValue);
+// Inicializa a Matriz de LEDs 5x5
+void init_WS2812() {
+    pio = pio0; 
+    sm = pio_config(pio);
 
-    // Habilita o PWM no slice correspondente
-    pwm_set_enabled(slicePWMLedB, 1);
-    pwm_set_enabled(slicePWMLedR, 1);
+    // Apaga LEDs
+    desenho_pio(desenho_apaga, 0, pio, sm, 0, 0, 0);
+}
+
+// Função para acender o LED por um tempo específico
+void controlaLed(uint gpio, bool operacao) {
+    gpio_put(gpio, operacao); // Liga/Desliga o LED indicado no parâmetro gpio
+}
+
+// Essa função lê o canal ADC do joystick e retorna o valor
+uint16_t read_joystick_axis(uint axis) {
+    adc_select_input(axis);
+    return adc_read();
+}
+
+// Essa função aciona o buzzer (nível de duty cycle: 0 a 65535)
+void buzzer_beep(uint16_t dutyValue) {
+    pwm_set_gpio_level(GPIO_BUZZER, dutyValue);
+}
+
+// Função para atualizar o display OLED
+void escreve_oled(const char *texto, uint linha) {
+    // Envia o texto para o display
+    uint lin = 5;
+    if (linha == 2) {
+        lin = 20;
+    }
+    else if (linha == 3) {
+        lin = 35;
+    }
+    else if (linha == 4) {
+        lin = 50;
+    }
+    ssd1306_draw_string(&ssd, "               ", 4, lin); 
+    ssd1306_draw_string(&ssd, texto, 4, lin); 
+    // Atualiza o display
+    ssd1306_send_data(&ssd); 
+
+    printf("OLED: %s\n", texto);
 }
 
 // Essa função mapeia valores de grandezas diferentes como acontece com o PWM e o ADC ou ADC e PIXEL
@@ -183,80 +265,199 @@ int  mapValue(int  x, int  in_min, int  in_max, int  out_min, int  out_max) {
     return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-// Variáveis para controlar a posição do quadrado no DISPLAY LCD (Posição inicial é o centro da tela)
-int  lcdLeft = (128/2)-4;
-int  lcdTop = (64/2)-4;
-
 // Rotina principal
 int main() {
     // Inicializa comunicação USB CDC para o monitor serial
     stdio_init_all();
 
-    // Chama funções de inicialização (LEDs, BOTÕES, interface I2C, conversor ADC)
+    // Chama funções de inicialização (LEDs, BOTÕES, interface I2C, conversor ADC, etc.)
     init_leds();
     init_botoes();
     init_I2C();
     init_adc();
     init_pwm();
+    init_WS2812();
 
-    // Configuração da interrupções - BOTÕES A, B e JOYSTICK
+    // Configuração da interrupções - PUSH-BUTTONS A e B 
     gpio_set_irq_enabled_with_callback(GPIO_BOTAO_A, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
     gpio_set_irq_enabled_with_callback(GPIO_BOTAO_B, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
-    gpio_set_irq_enabled_with_callback(GPIO_BTN_JOY, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
 
-    // Apaga o DISPLAY LCD e desenha um quadrado 8x8 no centro
-    ssd1306_fill(&ssd, false);
-    ssd1306_rect(&ssd, lcdTop, lcdLeft, 8, 8, true, true); 
-    ssd1306_send_data(&ssd);
-    
+    // Estado inicial
+    escreve_oled("VIA A - VERDE ", 2);
+
     // Laço principal do programa 
     while (true) {
-        // Seleciona o ADC para o eixo X do JOYSTICK
-        adc_select_input(1);
-        adc_valor_x = adc_read();
-        // Seleciona o ADC para o eixo Y do JOYSTICK
-        adc_select_input(0);
-        adc_valor_y = adc_read();
+        // Lê valor do ADC para o eixo X do JOYSTICK (Via "A")
+        adc_valor_x = read_joystick_axis(1);
 
-        // Muda a intensidade da luz dos LEDs AZUL e VERMELHO de acordo com a posição do JOYSTICK
-        // A função mapValue converte o valor ADC para PWM
-        int  pwm_valor_x = mapValue(adc_valor_x, 0, 4095, 0, wrapValue);
-        int  pwm_valor_y = mapValue(adc_valor_y, 0, 4095, 0, wrapValue);
-
-        // A função mapValue converte o valor ADC para as coordenadas do DISPLAY LCD (128x64 pixels)
-        lcdLeft = mapValue(adc_valor_x, 0, 4095, 3, 117);
-        lcdTop = mapValue(adc_valor_y, 0, 4095, 56, 3);
-
-        // Apaga a tela do DISPLAY LCD e desenha um quadrado 8x8 que se movimenta proporcionalmente aos valores capturados pelo joystick
-        ssd1306_fill(&ssd, 0); // Apaga a tela do DISPLAY LCD
-        sleep_ms(40); // Pausa para não sobrecarregar o processamento
-        ssd1306_rect(&ssd, lcdTop, lcdLeft, 8, 8, 1, 1); // Desenha um retângulo 8x8 
-        ssd1306_send_data(&ssd);
-        sleep_ms(40); // Pausa para não sobrecarregar o processamento
-
-        // Mostra no terminal os valores dos eixos X e Y do JOYSTICK
-        printf("JOYSTICK - PWM X = %d / PWM Y = %d\n", pwm_valor_x, pwm_valor_y);
+        // Lê valor do ADC para o eixo Y do JOYSTICK (Via "B")
+        adc_valor_y = read_joystick_axis(0);
         printf("JOYSTICK - ADC X = %d / ADC Y = %d\n", adc_valor_x, adc_valor_y);
-        printf("QUADRADO - Top   = %d / Left  = %d\n", lcdTop, lcdLeft);
 
-        /* 
-         * Acende e apaga os LEDs AZUL e VERMELHO se o JOYSTICK for movimentado 
-         * Obs: os intervalos foram definidos de acordo com a calibração do potenciômetro do JOYSTICK para que o LED não seja acionado quando estiver em posição centralizada
-         *      Pode ser diferente de placa para placa
-        */ 
-        if (adc_valor_y >= 1650 && adc_valor_y <= 2150 && !bLed_B_R) {
-            pwm_set_gpio_level(GPIO_LED_B, 0); 
+        // Calcula o fluxo de cada VIA em PERCENTUAL
+        fluxoViaA = ((float)adc_valor_x / 4095.0f) * 100.0f;
+        fluxoViaB = ((float)adc_valor_y / 4095.0f) * 100.0f;
+        printf("FLUXO - VIA A: %.1f%% / FLUXO - VIA B: %.1f%%\n", fluxoViaA, fluxoViaB);
+        
+        // Verifica se o push-button "A" foi pressionado e exibe aviso ao pedestre no display OLED
+        if (bPedestre) {
+            escreve_oled("PEDESTRE ESPERE", 3);
+            sleep_ms(100);
+            escreve_oled("               ", 3);
         }
-        else {
-            pwm_set_gpio_level(GPIO_LED_B, pwm_valor_y); 
+
+        uint32_t now = to_ms_since_boot(get_absolute_time()); // Atualiza o timer
+        uint32_t elapsedTime = now - tempoInicioEstado; // Calcula o tempo transcorrido do último estado
+
+        // Ajusta os tempos de verde com base no fluxo (cada ponto percentual adiciona 30 ms)
+        uint32_t tempoLuzVerdeA = LIGHT_G_TIME + (uint32_t)(fluxoViaA * 80);
+        uint32_t tempoLuzVerdeB = LIGHT_G_TIME + (uint32_t)(fluxoViaB * 80);
+
+        // Máquina de estados
+        uint indiceMatriz = 0; // Variável para controlar o que será exibido na Matriz de LEDs de acordo com o estado
+        switch (estadoAtual) {
+            case STATE_GREEN_A:
+                if (elapsedTime >= tempoLuzVerdeA) {
+                    estadoAtual = STATE_YELLOW_A;
+                    tempoInicioEstado = now;
+
+                    // Atualiza Display OLED
+                    escreve_oled("VIA A - AMARELO", 2);
+                }
+                indiceMatriz = 0;
+                break;
+            case STATE_YELLOW_A:
+                if (elapsedTime >= LIGHT_Y_TIME) {
+                    // Se houver solicitação de pedestre, muda para estado de travessia de pedestre
+                    if (bPedestre) {
+                        estadoAtual = STATE_PEDESTRIAN;
+                        tempoInicioEstado = to_ms_since_boot(get_absolute_time());
+
+                        bPedestre = false;
+                        bGreenA = false;
+
+                        // Atualiza Display OLED
+                        escreve_oled("                ", 3);
+                        escreve_oled("PODE ATRAVESSAR", 2);
+                    }
+                    else {
+                        estadoAtual = STATE_GREEN_B;
+                        tempoInicioEstado = now;
+
+                        // Atualiza Display OLED
+                        escreve_oled("VIA B - VERDE", 2);
+                    }
+                }
+                indiceMatriz = 1;
+                break;
+            case STATE_GREEN_B:
+                if (elapsedTime >= tempoLuzVerdeB) {
+                    estadoAtual = STATE_YELLOW_B;
+                    tempoInicioEstado = now;
+
+                    // Atualiza Display OLED
+                    escreve_oled("VIA B - AMARELO", 2);
+                }
+                indiceMatriz = 2;
+                break;
+            case STATE_YELLOW_B:
+                if (elapsedTime >= LIGHT_Y_TIME) {
+                    // Se houver solicitação de pedestre, muda para estado de travessia de pedestre
+                    if (bPedestre) {
+                        estadoAtual = STATE_PEDESTRIAN;
+                        tempoInicioEstado = to_ms_since_boot(get_absolute_time());
+
+                        // Atualiza Display OLED
+                        escreve_oled("                ", 3);
+                        escreve_oled("PODE ATRAVESSAR", 2);
+
+                        bPedestre = false;
+                        bGreenA = true;
+                    }
+                    else {
+                        estadoAtual = STATE_GREEN_A;
+                        tempoInicioEstado = now;
+
+                        // Atualiza Display OLED
+                        escreve_oled("VIA A - VERDE", 2);
+                    }
+                }
+                indiceMatriz = 3;
+                break;
+            case STATE_PEDESTRIAN:
+                if (elapsedTime >= LIGHT_PEDESTRIAN) {
+                    // Libera a via 
+                    estadoAtual = (bGreenA) ? STATE_GREEN_A : STATE_GREEN_B;
+                    tempoInicioEstado = now;
+
+                    // Atualiza Display OLED
+                    escreve_oled((estadoAtual == STATE_GREEN_A) ? "VIA A - VERDE" : "VIA B - VERDE", 2);
+                }
+                else {
+                    // Emite sinal sonoro
+                    buzzer_beep(2000); // duty cycle
+                    sleep_ms(500);
+                    buzzer_beep(0);
+                    sleep_ms(500);
+                }
+                indiceMatriz = 4;
+                break;
         }
-        if (adc_valor_x >= 1800 && adc_valor_x <= 2300 && !bLed_B_R) {
-            pwm_set_gpio_level(GPIO_LED_R, 0); 
+        // Atualizar o desenho WS2812B com base no estado do semáforo
+        gera_desenho(indiceMatriz, pio, sm);
+
+        
+        /* Atualizar o LED RGB conforme o nível de congestionamento:
+         * Se fluxo > 80% em qualquer via => congestionamento (vermelho)
+         * Se fluxo > 40% => fluxo normal (amarelo)
+         * Caso contrário, pista livre (verde)
+        */
+        if (fluxoViaA <= 40.0f || fluxoViaB <= 40.0f) {
+            controlaLed(GPIO_LED_R, false);
+            controlaLed(GPIO_LED_G, true);
+            controlaLed(GPIO_LED_B, false);
+
+            // Atualiza Display OLED
+            escreve_oled((fluxoViaA <= 40.0f) ? "VIA A - LIVRE" : "VIA B - LIVRE", 4);    
         }
-        else {
-            pwm_set_gpio_level(GPIO_LED_R, pwm_valor_x);
+        else if ((fluxoViaA > 40.0f && fluxoViaA <= 80.0f) && (fluxoViaB > 40.0f && fluxoViaB <= 80.0f)) {
+            controlaLed(GPIO_LED_R, true);
+            controlaLed(GPIO_LED_G, true);
+            controlaLed(GPIO_LED_B, false);
+
+            // Atualiza Display OLED
+            escreve_oled((fluxoViaA > 40.0f) ? "VIA A - NORMAL" : "VIA B - NORMAL", 4);    
+        } 
+        else if (fluxoViaA > 80.0f || fluxoViaB > 80.0f) {
+            controlaLed(GPIO_LED_R, true);
+            controlaLed(GPIO_LED_G, false);
+            controlaLed(GPIO_LED_B, false);
+
+            // Atualiza Display OLED
+            escreve_oled((fluxoViaA > 80.0f) ? "VIA A - ALERTA" : "VIA B - ALERTA", 4);    
+        } 
+        
+        // Atualizar o OLED com informações sobre o estado das luzes
+        char texto_oled[16];
+        uint32_t restando = 0;
+        if (estadoAtual == STATE_GREEN_A) {
+            restando = (tempoLuzVerdeA > elapsedTime) ? tempoLuzVerdeA - elapsedTime : 0;
+        } 
+        else if (estadoAtual == STATE_GREEN_B) {
+            restando = (tempoLuzVerdeB > elapsedTime) ? tempoLuzVerdeB - elapsedTime : 0;
+        } 
+        else if (estadoAtual == STATE_YELLOW_A || estadoAtual == STATE_YELLOW_B) {
+            restando = (LIGHT_Y_TIME > elapsedTime) ? LIGHT_Y_TIME - elapsedTime : 0;
+        } 
+        else if (estadoAtual == STATE_PEDESTRIAN) {
+            restando = (LIGHT_PEDESTRIAN > elapsedTime) ? LIGHT_PEDESTRIAN - elapsedTime : 0;
         }
+        snprintf(texto_oled, sizeof(texto_oled), "TEMPO: %d seg", (restando/1000) + 1);
+
+        // Atualiza Display OLED
+        escreve_oled(texto_oled, 1);
+        
+        sleep_ms(100);
     }
-
     return 0; // Retorno padrão da função main para programa finalizado corretamente
 }

@@ -44,6 +44,8 @@ target_link_libraries(LightFlow
     hardware_uart
     hardware_adc
     hardware_pwm
+    hardware_timer
+    hardware_pio
 )
 
 pico_enable_stdio_usb(LightFlow 1)
