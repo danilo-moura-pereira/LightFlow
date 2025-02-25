@@ -48,7 +48,6 @@
 // Constantes para os Tempos (em milissegundos) das luzes do semáforo
 #define LIGHT_G_TIME     8000    // Tempo base para sinal verde
 #define LIGHT_Y_TIME     3000    // Tempo base para sinal amarelo
-#define LIGHT_R_TIME     8000    // Tempo base para sinal vermelho
 #define LIGHT_PEDESTRIAN 10000   // Tempo para fase de pedestre
 
 /*
@@ -283,7 +282,7 @@ int main() {
     gpio_set_irq_enabled_with_callback(GPIO_BOTAO_B, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
 
     // Estado inicial
-    escreve_oled("VIA A - VERDE ", 2);
+    escreve_oled("VIA A   VERDE ", 2);
 
     // Laço principal do programa 
     while (true) {
@@ -331,7 +330,7 @@ int main() {
                     // Se houver solicitação de pedestre, muda para estado de travessia de pedestre
                     if (bPedestre) {
                         estadoAtual = STATE_PEDESTRIAN;
-                        tempoInicioEstado = to_ms_since_boot(get_absolute_time());
+                        tempoInicioEstado = now;
 
                         bPedestre = false;
                         bGreenA = false;
@@ -391,7 +390,7 @@ int main() {
                     tempoInicioEstado = now;
 
                     // Atualiza Display OLED
-                    escreve_oled((estadoAtual == STATE_GREEN_A) ? "VIA A - VERDE" : "VIA B - VERDE", 2);
+                    escreve_oled((estadoAtual == STATE_GREEN_A) ? "VIA A   VERDE" : "VIA B   VERDE", 2);
                 }
                 else {
                     // Emite sinal sonoro
@@ -418,7 +417,7 @@ int main() {
             controlaLed(GPIO_LED_B, false);
 
             // Atualiza Display OLED
-            escreve_oled((fluxoViaA <= 40.0f) ? "VIA A - LIVRE" : "VIA B - LIVRE", 4);    
+            escreve_oled((fluxoViaA <= 40.0f) ? "VIA A   LIVRE" : "VIA B   LIVRE", 4);    
         }
         else if ((fluxoViaA > 40.0f && fluxoViaA <= 80.0f) && (fluxoViaB > 40.0f && fluxoViaB <= 80.0f)) {
             controlaLed(GPIO_LED_R, true);
@@ -426,7 +425,7 @@ int main() {
             controlaLed(GPIO_LED_B, false);
 
             // Atualiza Display OLED
-            escreve_oled((fluxoViaA > 40.0f) ? "VIA A - NORMAL" : "VIA B - NORMAL", 4);    
+            escreve_oled((fluxoViaA > 40.0f) ? "VIA A   NORMAL" : "VIA B   NORMAL", 4);    
         } 
         else if (fluxoViaA > 80.0f || fluxoViaB > 80.0f) {
             controlaLed(GPIO_LED_R, true);
@@ -434,7 +433,7 @@ int main() {
             controlaLed(GPIO_LED_B, false);
 
             // Atualiza Display OLED
-            escreve_oled((fluxoViaA > 80.0f) ? "VIA A - ALERTA" : "VIA B - ALERTA", 4);    
+            escreve_oled((fluxoViaA > 80.0f) ? "VIA A   ALERTA" : "VIA B   ALERTA", 4);    
         } 
         
         // Atualizar o OLED com informações sobre o estado das luzes
