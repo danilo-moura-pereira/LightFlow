@@ -46,8 +46,8 @@
 #define PWM_DIVISER     125.0       // Divisor inteiro de 125.0. Poderia ser de até 
 
 // Constantes para os Tempos (em milissegundos) das luzes do semáforo
-#define LIGHT_G_TIME     8000    // Tempo base para sinal verde
-#define LIGHT_Y_TIME     3000    // Tempo base para sinal amarelo
+#define LIGHT_G_TIME     10000    // Tempo base para sinal verde
+#define LIGHT_Y_TIME     4000    // Tempo base para sinal amarelo
 #define LIGHT_PEDESTRIAN 10000   // Tempo para fase de pedestre
 
 /*
@@ -241,15 +241,18 @@ void buzzer_beep(uint16_t dutyValue) {
 // Função para atualizar o display OLED
 void escreve_oled(const char *texto, uint linha) {
     // Envia o texto para o display
-    uint lin = 5;
+    uint lin = 1;
     if (linha == 2) {
-        lin = 20;
+        lin = 14;
     }
     else if (linha == 3) {
-        lin = 35;
+        lin = 27;
     }
     else if (linha == 4) {
-        lin = 50;
+        lin = 40;
+    }
+    else if (linha == 5) {
+        lin = 53;
     }
     ssd1306_draw_string(&ssd, "               ", 4, lin); 
     ssd1306_draw_string(&ssd, texto, 4, lin); 
@@ -282,7 +285,8 @@ int main() {
     gpio_set_irq_enabled_with_callback(GPIO_BOTAO_B, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
 
     // Estado inicial
-    escreve_oled("VIA A   VERDE ", 2);
+    escreve_oled("VIA A  VERDE   ", 2);
+    escreve_oled("VIA B  VERMELHO", 3);
 
     // Laço principal do programa 
     while (true) {
@@ -300,9 +304,12 @@ int main() {
         
         // Verifica se o push-button "A" foi pressionado e exibe aviso ao pedestre no display OLED
         if (bPedestre) {
-            escreve_oled("PEDESTRE ESPERE", 3);
+            escreve_oled("PEDESTRE ESPERE", 4);
             sleep_ms(100);
-            escreve_oled("               ", 3);
+            escreve_oled("               ", 4);
+        }
+        else {
+            escreve_oled("               ", 4);
         }
 
         uint32_t now = to_ms_since_boot(get_absolute_time()); // Atualiza o timer
@@ -321,7 +328,8 @@ int main() {
                     tempoInicioEstado = now;
 
                     // Atualiza Display OLED
-                    escreve_oled("VIA A - AMARELO", 2);
+                    escreve_oled("VIA A  AMARELO ", 2);
+                    escreve_oled("VIA B  VERMELHO", 3);
                 }
                 indiceMatriz = 0;
                 break;
@@ -336,15 +344,16 @@ int main() {
                         bGreenA = false;
 
                         // Atualiza Display OLED
-                        escreve_oled("                ", 3);
-                        escreve_oled("PODE ATRAVESSAR", 2);
+                        escreve_oled("VIA A  VERMELHO", 2);
+                        escreve_oled("VIA B  VERMELHO", 3);
                     }
                     else {
                         estadoAtual = STATE_GREEN_B;
                         tempoInicioEstado = now;
 
                         // Atualiza Display OLED
-                        escreve_oled("VIA B - VERDE", 2);
+                        escreve_oled("VIA B  VERDE   ", 2);
+                        escreve_oled("VIA A  VERMELHO", 3);
                     }
                 }
                 indiceMatriz = 1;
@@ -355,9 +364,10 @@ int main() {
                     tempoInicioEstado = now;
 
                     // Atualiza Display OLED
-                    escreve_oled("VIA B - AMARELO", 2);
+                    escreve_oled("VIA B  AMARELO ", 2);
+                    escreve_oled("VIA A  VERMELHO", 3);
                 }
-                indiceMatriz = 2;
+                indiceMatriz = 3;
                 break;
             case STATE_YELLOW_B:
                 if (elapsedTime >= LIGHT_Y_TIME) {
@@ -365,10 +375,6 @@ int main() {
                     if (bPedestre) {
                         estadoAtual = STATE_PEDESTRIAN;
                         tempoInicioEstado = to_ms_since_boot(get_absolute_time());
-
-                        // Atualiza Display OLED
-                        escreve_oled("                ", 3);
-                        escreve_oled("PODE ATRAVESSAR", 2);
 
                         bPedestre = false;
                         bGreenA = true;
@@ -378,10 +384,11 @@ int main() {
                         tempoInicioEstado = now;
 
                         // Atualiza Display OLED
-                        escreve_oled("VIA A - VERDE", 2);
+                        escreve_oled("VIA A  VERDE   ", 2);
+                        escreve_oled("VIA B  VERMELHO", 3);
                     }
                 }
-                indiceMatriz = 3;
+                indiceMatriz = 4;
                 break;
             case STATE_PEDESTRIAN:
                 if (elapsedTime >= LIGHT_PEDESTRIAN) {
@@ -390,20 +397,44 @@ int main() {
                     tempoInicioEstado = now;
 
                     // Atualiza Display OLED
-                    escreve_oled((estadoAtual == STATE_GREEN_A) ? "VIA A   VERDE" : "VIA B   VERDE", 2);
+                    if (estadoAtual == STATE_GREEN_A) {
+                        escreve_oled("VIA A  VERDE   ", 2);
+                        escreve_oled("VIA B  VERMELHO", 3);
+                    }
+                    else {
+                        escreve_oled("VIA B  VERDE   ", 2);
+                        escreve_oled("VIA A  VERMELHO", 3);
+                    }
                 }
                 else {
+                    // Atualiza Display OLED
+                    escreve_oled("               ", 4);
+                    escreve_oled("PODE ATRAVESSAR", 4);
                     // Emite sinal sonoro
                     buzzer_beep(2000); // duty cycle
                     sleep_ms(500);
                     buzzer_beep(0);
-                    sleep_ms(500);
+                    sleep_ms(400);
                 }
-                indiceMatriz = 4;
+                indiceMatriz = 6;
                 break;
         }
         // Atualizar o desenho WS2812B com base no estado do semáforo
-        gera_desenho(indiceMatriz, pio, sm);
+        if (indiceMatriz == 0) {
+            gera_desenho(indiceMatriz, pio, sm);
+            sleep_ms(500);
+            gera_desenho(indiceMatriz + 5, pio, sm);
+            sleep_ms(400);
+        } 
+        else if (indiceMatriz == 3) {
+            gera_desenho(indiceMatriz, pio, sm);
+            sleep_ms(500);
+            gera_desenho(indiceMatriz - 1, pio, sm);
+            sleep_ms(400);
+        }
+        else {
+            gera_desenho(indiceMatriz, pio, sm);
+        }
 
         
         /* Atualizar o LED RGB conforme o nível de congestionamento:
@@ -417,7 +448,7 @@ int main() {
             controlaLed(GPIO_LED_B, false);
 
             // Atualiza Display OLED
-            escreve_oled((fluxoViaA <= 40.0f) ? "VIA A   LIVRE" : "VIA B   LIVRE", 4);    
+            escreve_oled((fluxoViaA <= 40.0f) ? "VIA A   LIVRE" : "VIA B   LIVRE", 5);    
         }
         else if ((fluxoViaA > 40.0f && fluxoViaA <= 80.0f) && (fluxoViaB > 40.0f && fluxoViaB <= 80.0f)) {
             controlaLed(GPIO_LED_R, true);
@@ -425,7 +456,7 @@ int main() {
             controlaLed(GPIO_LED_B, false);
 
             // Atualiza Display OLED
-            escreve_oled((fluxoViaA > 40.0f) ? "VIA A   NORMAL" : "VIA B   NORMAL", 4);    
+            escreve_oled((fluxoViaA > 40.0f) ? "VIA A   NORMAL" : "VIA B   NORMAL", 5);    
         } 
         else if (fluxoViaA > 80.0f || fluxoViaB > 80.0f) {
             controlaLed(GPIO_LED_R, true);
@@ -433,7 +464,7 @@ int main() {
             controlaLed(GPIO_LED_B, false);
 
             // Atualiza Display OLED
-            escreve_oled((fluxoViaA > 80.0f) ? "VIA A   ALERTA" : "VIA B   ALERTA", 4);    
+            escreve_oled((fluxoViaA > 80.0f) ? "VIA A   ALERTA" : "VIA B   ALERTA", 5);    
         } 
         
         // Atualizar o OLED com informações sobre o estado das luzes
